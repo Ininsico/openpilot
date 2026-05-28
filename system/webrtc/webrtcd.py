@@ -99,13 +99,38 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
       await asyncio.sleep(0.01)
 
 
+def parse_incoming_services(services: list[str]) -> dict[str, set[str] | None]:
+  allowed: dict[str, set[str] | None] = {}
+  for entry in services:
+    service, _, field_name = entry.partition(".")
+    if not field_name:
+      allowed[service] = None
+    elif service not in allowed:
+      allowed[service] = {field_name}
+    elif allowed[service] is not None:
+      allowed[service].add(field_name)
+  return allowed
+
+
 class CerealIncomingMessageProxy:
-  def __init__(self, pm: messaging.PubMaster):
+  def __init__(self, pm: messaging.PubMaster, allowed_fields: dict[str, set[str] | None] | None = None):
     self.pm = pm
+    self.allowed_fields = allowed_fields
 
   def send(self, message: bytes):
     msg_json = json.loads(message)
     msg_type, msg_data = msg_json["type"], msg_json["data"]
+
+    if self.allowed_fields is not None:
+      # reject if service is not allowed
+      if msg_type not in list(self.allowed_fields.keys()):
+        return
+
+      # remove subfield of service if it is not allowed
+      allowed = self.allowed_fields[msg_type]
+      if allowed is not None and isinstance(msg_data, dict):
+        msg_data = {k: v for k, v in msg_data.items() if k in allowed}
+
     size = None
     if not isinstance(msg_data, dict):
       size = len(msg_data)
@@ -144,10 +169,11 @@ class StreamSession:
     self.identifier = str(uuid.uuid4())
 
     self.incoming_bridge: CerealIncomingMessageProxy | None = None
-    self.incoming_bridge_services = incoming_services
+    incoming_allowed_fields = parse_incoming_services(incoming_services)
+    self.incoming_bridge_services = list(incoming_allowed_fields.keys())
     self.outgoing_bridge: CerealOutgoingMessageProxy | None = None
     if len(incoming_services) > 0:
-      self.incoming_bridge = CerealIncomingMessageProxy(self.shared_pub_master)
+      self.incoming_bridge = CerealIncomingMessageProxy(self.shared_pub_master, incoming_allowed_fields)
     if len(outgoing_services) > 0:
       self.outgoing_bridge = CerealOutgoingMessageProxy(messaging.SubMaster(outgoing_services))
 
@@ -199,8 +225,6 @@ class StreamSession:
             self.video_track.timing_sei_enabled = enabled
           return
 
-      if payload.get("type") not in self.incoming_bridge_services:
-        return
       self.incoming_bridge.send(message)
     except Exception:
       self.logger.exception("Cereal incoming proxy failure")

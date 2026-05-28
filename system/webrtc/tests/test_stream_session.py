@@ -9,9 +9,9 @@ warnings.filterwarnings("ignore", category=RuntimeWarning) # TODO: remove this w
 from aiortc import RTCDataChannel
 from aiortc.mediastreams import VIDEO_CLOCK_RATE, VIDEO_TIME_BASE
 import capnp
-from cereal import messaging, log
+from cereal import messaging, log, car
 
-from openpilot.system.webrtc.webrtcd import CerealOutgoingMessageProxy, CerealIncomingMessageProxy
+from openpilot.system.webrtc.webrtcd import CerealOutgoingMessageProxy, CerealIncomingMessageProxy, parse_incoming_services
 from openpilot.system.webrtc.device.video import LiveStreamVideoStreamTrack
 
 
@@ -65,6 +65,28 @@ class TestStreamSession:
       assert hasattr(md, msg["type"])
 
       mocked_pubmaster.reset_mock()
+
+  def test_parse_incoming_services(self):
+    assert parse_incoming_services(["testJoystick"]) == {"testJoystick": None}
+    assert parse_incoming_services(["selfdriveState.alertSound"]) == {"selfdriveState": {"alertSound"}}
+    assert parse_incoming_services(["selfdriveState.alertSound", "selfdriveState.alertText1"]) == {"selfdriveState": {"alertSound", "alertText1"}}
+    assert parse_incoming_services(["selfdriveState.alertSound", "selfdriveState"]) == {"selfdriveState": None}
+    assert parse_incoming_services(["selfdriveState", "selfdriveState.alertSound"]) == {"selfdriveState": None}
+
+  def test_incoming_proxy_field_restriction(self, mocker):
+    mocked_pubmaster = mocker.MagicMock(spec=messaging.PubMaster)
+    allowed_fields = parse_incoming_services(["selfdriveState.alertSound"])
+    proxy = CerealIncomingMessageProxy(mocked_pubmaster, allowed_fields)
+
+    msg = {"type": "selfdriveState", "data": {"alertSound": "warningImmediate", "enabled": True, "alertText1": "blocked"}}
+    proxy.send(json.dumps(msg).encode())
+
+    mocked_pubmaster.send.assert_called_once()
+    _, md = mocked_pubmaster.send.call_args.args
+    # only the allowed field is published; everything else stays at default
+    assert md.selfdriveState.alertSound.raw == car.CarControl.HUDControl.AudibleAlert.warningImmediate
+    assert md.selfdriveState.enabled is False
+    assert md.selfdriveState.alertText1 == ""
 
   def test_livestream_track(self, mocker):
     fake_msg = messaging.new_message("livestreamDriverEncodeData")
